@@ -1,32 +1,37 @@
 # React + TypeScript + Vite
+Cloudflare Durable Objects と WebSocket を用いた2人用リアルタイムお絵描きアプリ。
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+## 必要環境
++ Node.js
++ npm
++ Cloudflare
 
-Currently, two official plugins are available:
+# はじめかた
+ローカル起動
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+``` powershell
+npm run dev
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+本番ビルド/デプロイ
+
+``` powershell
+npm run build
+npm run deploy
+```
+
+<!--
+## メモ
+Cloudflare Workers と Durable Object がバックエンドになっている。
+`ctx.storage.get()` と、
+`put()` と、
+`delete()`
+ によりルーム状態と描画済みストロークを保存している。<br>
+
+### Cloudflare Workers
+Cloudflare Workers は、Cloudflareの世界中のネットワーク上で、自分のサーバを管理せずにプログラムを実行できるサーバレス実行環境。サーバ管理なしでアプリを構築・デプロイ・スケールできるプラットフォーム。現在の実装では、 Cloudflare Workers へデプロイする構成であり、Cloudflare Tunnel は使っていない。
+
+### Durable Object
+ Durable Object は Cloudflare が提供している「状態(state)を持てるサーバレス実行単位」
+
+-->

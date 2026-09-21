@@ -24,13 +24,22 @@ type RoomState = {
   roomCode: string
   status: 'waiting' | 'playing'
   players: Player[]
-  currentTurnIndex: number
-  round: number
-  word: string
   strokes: Stroke[]
 }
 
-const DEFAULT_COLORS = ['#0f172a', '#ef4444', '#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ec4899', '#f8fafc']
+type ToolMode = 'pen' | 'eraser' | 'pan'
+
+const CANVAS_WIDTH = 900
+const CANVAS_HEIGHT = 560
+
+const DEFAULT_COLORS = [
+  '#000000', '#ffffff', '#7f1d1d', '#dc2626', '#fb7185',
+  '#9a3412', '#f97316', '#f59e0b', '#facc15', '#365314',
+  '#65a30d', '#22c55e', '#10b981', '#0f766e', '#14b8a6',
+  '#164e63', '#06b6d4', '#0284c7', '#2563eb', '#1d4ed8',
+  '#3730a3', '#4f46e5', '#7c3aed', '#9333ea', '#c026d3',
+  '#db2777', '#be185d', '#78350f', '#64748b', '#cbd5e1',
+]
 
 const getPlayerId = () => {
   const storedId = window.sessionStorage.getItem('draw-vs-player-id')
@@ -57,13 +66,16 @@ const resolveSocketUrl = (roomCode: string, playerId: string, playerName: string
 function App() {
   const [roomCode, setRoomCode] = useState('demo-room')
   const [playerName, setPlayerName] = useState('Player')
-  const [selectedColor, setSelectedColor] = useState('#0f172a')
-  const [brushSize, setBrushSize] = useState(5)
-  const [statusText, setStatusText] = useState('部屋に参加して対戦を始めましょう')
+  const [selectedColor, setSelectedColor] = useState('#000000')
+  const [brushSize, setBrushSize] = useState(2)
+  const [toolMode, setToolMode] = useState<ToolMode>('pen')
+  const [eraserCursor, setEraserCursor] = useState<Point | null>(null)
   const [connected, setConnected] = useState(false)
   const [game, setGame] = useState<RoomState | null>(null)
   const [strokes, setStrokes] = useState<Stroke[]>([])
   const [isDrawing, setIsDrawing] = useState(false)
+  const [zoom, setZoom] = useState(1)
+  const [pan, setPan] = useState({ x: 0, y: 0 })
   const [selfId] = useState(getPlayerId)
 
   const socketRef = useRef<WebSocket | null>(null)
@@ -72,6 +84,10 @@ function App() {
   const pendingPointsRef = useRef<Point[]>([])
   const pointFlushTimerRef = useRef<number | null>(null)
   const playerIdRef = useRef(selfId)
+  const activePointerIdRef = useRef<number | null>(null)
+  const pointersRef = useRef(new Map<number, Point>())
+  const panGestureRef = useRef<{ pointerId: number; x: number; y: number; panX: number; panY: number } | null>(null)
+  const pinchGestureRef = useRef<{ distance: number; center: Point; zoom: number; panX: number; panY: number } | null>(null)
 
   useEffect(() => {
     const storedName = window.localStorage.getItem('draw-vs-player-name')
@@ -104,9 +120,34 @@ function App() {
       return
     }
 
+    canvas.width = Math.max(1, Math.round(CANVAS_WIDTH / zoom))
+    canvas.height = Math.max(1, Math.round(CANVAS_HEIGHT / zoom))
+    const canvasScale = canvas.clientWidth / canvas.width
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.clearRect(0, 0, canvas.width, canvas.height)
     ctx.fillStyle = '#ffffff'
     ctx.fillRect(0, 0, canvas.width, canvas.height)
+    ctx.setTransform(1, 0, 0, 1, pan.x / canvasScale, pan.y / canvasScale)
+
+    const gridSpacing = 100
+    const visibleLeft = -pan.x / canvasScale
+    const visibleTop = -pan.y / canvasScale
+    const visibleRight = visibleLeft + canvas.clientWidth / canvasScale
+    const visibleBottom = visibleTop + canvas.clientHeight / canvasScale
+    const firstVerticalLine = Math.floor(visibleLeft / gridSpacing) * gridSpacing
+    const firstHorizontalLine = Math.floor(visibleTop / gridSpacing) * gridSpacing
+    ctx.beginPath()
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.32)'
+    ctx.lineWidth = 1 / Math.max(canvasScale, 0.01)
+    for (let x = firstVerticalLine; x <= visibleRight; x += gridSpacing) {
+      ctx.moveTo(x, visibleTop)
+      ctx.lineTo(x, visibleBottom)
+    }
+    for (let y = firstHorizontalLine; y <= visibleBottom; y += gridSpacing) {
+      ctx.moveTo(visibleLeft, y)
+      ctx.lineTo(visibleRight, y)
+    }
+    ctx.stroke()
 
     for (const stroke of strokes) {
       if (stroke.points.length === 0) {
@@ -126,9 +167,9 @@ function App() {
 
       ctx.stroke()
     }
-  }, [strokes])
+  }, [pan, strokes, zoom])
 
-  const isMyTurn = Boolean(game && game.players[game.currentTurnIndex]?.id === selfId && game.status === 'playing')
+  const canDraw = game?.status === 'playing'
 
   const handleJoin = () => {
     const name = playerName.trim() || 'Player'
@@ -148,7 +189,6 @@ function App() {
       }
 
       setConnected(true)
-      setStatusText('接続しました。対戦相手を待っています。')
     }
 
     socket.onmessage = (event) => {
@@ -159,6 +199,7 @@ function App() {
         stroke?: Stroke
         strokeId?: string
         points?: Point[]
+        eraseIds?: string[]
       }
 
       if (payload.type === 'state' && payload.room) {
@@ -175,7 +216,6 @@ function App() {
             ? serverStrokes.map((stroke) => stroke.id === activeStroke.id ? activeStroke : stroke)
             : [...serverStrokes, activeStroke]
         })
-        setStatusText(payload.room.status === 'waiting' ? '対戦相手を待っています。' : payload.room.players[payload.room.currentTurnIndex]?.id === playerIdRef.current ? 'あなたのターンです。描いてください。' : '相手のターンです。描く様子を見ることができます。')
       }
 
       if (payload.type === 'draw:start' && payload.stroke) {
@@ -193,8 +233,9 @@ function App() {
         setStrokes([])
       }
 
-      if (payload.type === 'system' && payload.message) {
-        setStatusText(payload.message)
+      if (payload.type === 'draw:erase' && payload.eraseIds?.length) {
+        const eraseIds = new Set(payload.eraseIds)
+        setStrokes((previous) => previous.filter((stroke) => !eraseIds.has(stroke.id)))
       }
     }
 
@@ -204,12 +245,11 @@ function App() {
       }
 
       setConnected(false)
-      setStatusText('接続が切れました。もう一度参加してください。')
     }
 
     socket.onerror = () => {
       if (socketRef.current === socket) {
-        setStatusText('通信エラーが発生しました。')
+        setConnected(false)
       }
     }
   }
@@ -252,27 +292,129 @@ function App() {
     pointFlushTimerRef.current = window.setTimeout(flushPendingPoints, 32)
   }
 
-  const getCanvasPoint = (event: ReactPointerEvent<HTMLCanvasElement>): Point => {
+  const getCanvasPoint = (event: ReactPointerEvent<HTMLDivElement>): Point => {
     const canvas = canvasRef.current
     if (!canvas) {
       return { x: 0, y: 0 }
     }
 
     const rect = canvas.getBoundingClientRect()
+    const canvasScale = canvas.clientWidth / canvas.width
     return {
-      x: ((event.clientX - rect.left) / rect.width) * canvas.width,
-      y: ((event.clientY - rect.top) / rect.height) * canvas.height,
+      x: (event.clientX - rect.left - pan.x) / canvasScale,
+      y: (event.clientY - rect.top - pan.y) / canvasScale,
     }
   }
 
-  const handlePointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (!isMyTurn) {
+  const clampZoom = (value: number) => Math.min(3, Math.max(0.5, value))
+
+  const getPointerCenter = (pointers: Map<number, Point>) => {
+    const points = [...pointers.values()]
+    return {
+      x: points.reduce((sum, point) => sum + point.x, 0) / points.length,
+      y: points.reduce((sum, point) => sum + point.y, 0) / points.length,
+    }
+  }
+
+  const getPointerDistance = (pointers: Map<number, Point>) => {
+    const points = [...pointers.values()]
+    if (points.length < 2) {
+      return 0
+    }
+
+    return Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y)
+  }
+
+  const updateZoom = (nextZoom: number, anchor?: Point) => {
+    const clampedZoom = clampZoom(nextZoom)
+    if (anchor) {
+      setPan((previous) => ({
+        x: anchor.x - (anchor.x - previous.x) * clampedZoom / zoom,
+        y: anchor.y - (anchor.y - previous.y) * clampedZoom / zoom,
+      }))
+    }
+    setZoom(clampedZoom)
+  }
+
+  const finishActiveStroke = () => {
+    const activeStroke = activeStrokeRef.current
+    if (!activeStroke) {
+      return
+    }
+
+    flushPendingPoints()
+    sendMessage({
+      type: 'draw:end',
+      roomCode,
+      playerId: playerIdRef.current,
+      strokeId: activeStroke.id,
+      stroke: activeStroke,
+    })
+    activeStrokeRef.current = null
+    pendingPointsRef.current = []
+    activePointerIdRef.current = null
+    setIsDrawing(false)
+  }
+
+  const eraseAtPoint = (point: Point) => {
+    const eraserRadius = brushSize / 2
+    const erasedIds = strokes
+      .filter((stroke) => stroke.points.some((strokePoint) => Math.hypot(strokePoint.x - point.x, strokePoint.y - point.y) <= eraserRadius))
+      .map((stroke) => stroke.id)
+
+    if (erasedIds.length === 0) {
+      return
+    }
+
+    const erasedIdSet = new Set(erasedIds)
+    setStrokes((previous) => previous.filter((stroke) => !erasedIdSet.has(stroke.id)))
+    sendMessage({ type: 'draw:erase', roomCode, playerId: playerIdRef.current, eraseIds: erasedIds })
+  }
+
+  const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const pointerPosition = { x: event.clientX, y: event.clientY }
+    pointersRef.current.set(event.pointerId, pointerPosition)
+    const viewportRect = event.currentTarget.getBoundingClientRect()
+    setEraserCursor({ x: event.clientX - viewportRect.left, y: event.clientY - viewportRect.top })
+    event.currentTarget.setPointerCapture(event.pointerId)
+
+    if (pointersRef.current.size >= 2) {
+      finishActiveStroke()
+      const center = getPointerCenter(pointersRef.current)
+      pinchGestureRef.current = {
+        distance: getPointerDistance(pointersRef.current),
+        center,
+        zoom,
+        panX: pan.x,
+        panY: pan.y,
+      }
+      panGestureRef.current = null
+      event.preventDefault()
+      return
+    }
+
+    if (toolMode === 'pan') {
+      panGestureRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y }
+      event.preventDefault()
+      return
+    }
+
+    if (!canDraw) {
       return
     }
 
     const point = getCanvasPoint(event)
+    if (toolMode === 'eraser') {
+      eraseAtPoint(point)
+      activePointerIdRef.current = event.pointerId
+      setIsDrawing(true)
+      event.preventDefault()
+      return
+    }
+
     const stroke: Stroke = { id: crypto.randomUUID(), color: selectedColor, width: brushSize, points: [point] }
     activeStrokeRef.current = stroke
+    activePointerIdRef.current = event.pointerId
     pendingPointsRef.current = []
     setIsDrawing(true)
     setStrokes((previous) => [...previous, stroke])
@@ -280,8 +422,35 @@ function App() {
     event.preventDefault()
   }
 
-  const handlePointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-    if (!isDrawing || !activeStrokeRef.current || !isMyTurn) {
+  const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY })
+    const viewportRect = event.currentTarget.getBoundingClientRect()
+    setEraserCursor({ x: event.clientX - viewportRect.left, y: event.clientY - viewportRect.top })
+
+    if (pinchGestureRef.current && pointersRef.current.size >= 2) {
+      const gesture = pinchGestureRef.current
+      const center = getPointerCenter(pointersRef.current)
+      const distanceRatio = getPointerDistance(pointersRef.current) / gesture.distance
+      setZoom(clampZoom(gesture.zoom * distanceRatio))
+      setPan({ x: gesture.panX + center.x - gesture.center.x, y: gesture.panY + center.y - gesture.center.y })
+      event.preventDefault()
+      return
+    }
+
+    const panGesture = panGestureRef.current
+    if (panGesture?.pointerId === event.pointerId) {
+      setPan({ x: panGesture.panX + event.clientX - panGesture.x, y: panGesture.panY + event.clientY - panGesture.y })
+      event.preventDefault()
+      return
+    }
+
+    if (isDrawing && toolMode === 'eraser' && activePointerIdRef.current === event.pointerId) {
+      eraseAtPoint(getCanvasPoint(event))
+      event.preventDefault()
+      return
+    }
+
+    if (!isDrawing || !activeStrokeRef.current || !canDraw || activePointerIdRef.current !== event.pointerId) {
       return
     }
 
@@ -302,27 +471,30 @@ function App() {
     schedulePointFlush()
   }
 
-  const handlePointerUp = () => {
-    if (!activeStrokeRef.current) {
-      return
+  const handlePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    pointersRef.current.delete(event.pointerId)
+    panGestureRef.current = null
+    if (pointersRef.current.size < 2) {
+      pinchGestureRef.current = null
     }
 
-    flushPendingPoints()
-    sendMessage({
-      type: 'draw:end',
-      roomCode,
-      playerId: playerIdRef.current,
-      strokeId: activeStrokeRef.current.id,
-      stroke: activeStrokeRef.current,
-    })
+    if (activePointerIdRef.current === event.pointerId) {
+      if (toolMode === 'pen') {
+        finishActiveStroke()
+      } else {
+        activePointerIdRef.current = null
+        setIsDrawing(false)
+      }
+    }
+  }
 
-    activeStrokeRef.current = null
-    pendingPointsRef.current = []
-    setIsDrawing(false)
+  const handlePointerLeave = (event: ReactPointerEvent<HTMLDivElement>) => {
+    setEraserCursor(null)
+    handlePointerUp(event)
   }
 
   const handleClearBoard = () => {
-    if (!isMyTurn) {
+    if (!canDraw) {
       return
     }
 
@@ -330,17 +502,21 @@ function App() {
     sendMessage({ type: 'clear', roomCode, playerId: playerIdRef.current })
   }
 
-  const handleNextTurn = () => {
-    if (!isMyTurn) {
-      return
-    }
+  const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    const rect = event.currentTarget.getBoundingClientRect()
+    updateZoom(zoom * (event.deltaY < 0 ? 1.1 : 0.9), {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+    })
+  }
 
-    sendMessage({ type: 'nextTurn', roomCode, playerId: playerIdRef.current })
+  const resetView = () => {
+    setZoom(1)
+    setPan({ x: 0, y: 0 })
   }
 
   const palette = DEFAULT_COLORS
-  const currentPlayerName = game?.players.find((player) => player.id === selfId)?.name ?? playerName
-
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -374,11 +550,11 @@ function App() {
           <h2>Players</h2>
           <div className="players-list">
             {game?.players.length ? (
-              game.players.map((player, index) => (
-                <div key={player.id} className={`player-card ${index === game.currentTurnIndex ? 'active' : ''}`}>
+              game.players.map((player) => (
+                <div key={player.id} className="player-card">
                   <span>{player.name}</span>
                   <small>{player.id === selfId ? 'You' : 'Opponent'}</small>
-                  <em>{index === game.currentTurnIndex ? 'Drawing' : 'Waiting'}</em>
+                  <em>{player.connected ? 'Connected' : 'Offline'}</em>
                 </div>
               ))
             ) : (
@@ -386,19 +562,14 @@ function App() {
             )}
           </div>
 
-          <div className="info-box">
-            <span className="label">Round</span>
-            <strong>{game ? game.round : 1}</strong>
-          </div>
-
-          <div className="info-box">
-            <span className="label">Prompt</span>
-            <strong>{game?.word ?? 'Ready'}</strong>
-          </div>
-
           <div className="toolbar">
-            <label>Brush</label>
-            <input type="range" min="2" max="20" value={brushSize} onChange={(event) => setBrushSize(Number(event.target.value))} />
+            <div className="tool-modes" aria-label="Drawing mode">
+              <button type="button" className={toolMode === 'pen' ? 'selected' : ''} onClick={() => setToolMode('pen')} aria-label="Pen mode" title="Pen mode"><span className="tool-icon pen-icon" aria-hidden="true">✎</span></button>
+              <button type="button" className={toolMode === 'eraser' ? 'selected' : ''} onClick={() => setToolMode('eraser')} aria-label="Eraser mode" title="Eraser mode"><span className="tool-icon eraser-icon" aria-hidden="true">▱</span></button>
+              <button type="button" className={toolMode === 'pan' ? 'selected' : ''} onClick={() => setToolMode('pan')} aria-label="Pan mode" title="Pan mode"><span className="tool-icon pan-icon" aria-hidden="true">✋</span></button>
+            </div>
+            <label>{toolMode === 'eraser' ? 'Eraser size' : 'Brush size'}</label>
+            <input type="range" min="1" max="8" value={brushSize} onChange={(event) => setBrushSize(Number(event.target.value))} />
             <span>{brushSize}px</span>
           </div>
 
@@ -416,37 +587,42 @@ function App() {
           </div>
 
           <div className="action-row">
-            <button type="button" className="secondary-button" onClick={handleClearBoard} disabled={!isMyTurn}>
+            <button type="button" className="secondary-button" onClick={handleClearBoard} disabled={!canDraw}>
               Clear
-            </button>
-            <button type="button" className="primary-button" onClick={handleNextTurn} disabled={!isMyTurn}>
-              End turn
             </button>
           </div>
         </div>
 
         <div className="panel board-panel">
-          <div className="board-header">
-            <div>
-              <p className="eyebrow">Status</p>
-              <h2>{isMyTurn ? 'Your turn' : 'Opponent turn'}</h2>
-            </div>
-            <span className="player-tag">{currentPlayerName}</span>
+          <div className="canvas-toolbar">
+            <button type="button" className="zoom-button" onClick={() => updateZoom(zoom - 0.25)} aria-label="Zoom out">−</button>
+            <span>{Math.round(zoom * 100)}%</span>
+            <button type="button" className="zoom-button" onClick={() => updateZoom(zoom + 0.25)} aria-label="Zoom in">+</button>
+            <button type="button" className="zoom-reset" onClick={resetView}>Reset view</button>
           </div>
-
-          <div className="status-bar">{statusText}</div>
-
-          <canvas
-            ref={canvasRef}
-            width={900}
-            height={560}
-            className="draw-canvas"
+          <div
+            className={`canvas-viewport mode-${toolMode}`}
+            onWheel={handleWheel}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
-            onPointerLeave={handlePointerUp}
+            onPointerLeave={handlePointerLeave}
             onPointerCancel={handlePointerUp}
-          />
+          >
+            <canvas ref={canvasRef} width={900} height={560} className="draw-canvas" />
+            {toolMode === 'eraser' && eraserCursor && canvasRef.current && (
+              <span
+                className="eraser-cursor"
+                style={{
+                  left: eraserCursor.x,
+                  top: eraserCursor.y,
+                  width: brushSize * (canvasRef.current.clientWidth / canvasRef.current.width),
+                  height: brushSize * (canvasRef.current.clientWidth / canvasRef.current.width),
+                }}
+                aria-hidden="true"
+              />
+            )}
+          </div>
         </div>
       </section>
     </main>

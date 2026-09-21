@@ -26,9 +26,6 @@ type RoomState = {
   roomCode: string
   status: 'waiting' | 'playing'
   players: Player[]
-  currentTurnIndex: number
-  round: number
-  word: string
   strokes: Stroke[]
 }
 
@@ -36,22 +33,14 @@ type SocketAttachment = {
   roomCode?: string
   playerId?: string
   playerName?: string
-  canDraw?: boolean
 }
-
-const WORD_BANK = ['cat', 'tree', 'rocket', 'beach', 'sun', 'flower', 'house', 'car', 'mountain', 'pizza']
 
 const createRoom = (roomCode: string): RoomState => ({
   roomCode,
   status: 'waiting',
   players: [],
-  currentTurnIndex: 0,
-  round: 1,
-  word: WORD_BANK[0],
   strokes: [],
 })
-
-const pickWord = () => WORD_BANK[Math.floor(Math.random() * WORD_BANK.length)]
 
 export class DrawGameRoom extends DurableObject {
   private room?: RoomState
@@ -123,27 +112,6 @@ export class DrawGameRoom extends DurableObject {
       return true
     })
 
-    if (room.currentTurnIndex >= room.players.length) {
-      room.currentTurnIndex = 0
-    }
-  }
-
-  private updateTurnAttachments(room: RoomState) {
-    const currentPlayerId = room.status === 'playing'
-      ? room.players[room.currentTurnIndex]?.id
-      : undefined
-
-    for (const socket of this.sockets) {
-      const attachment = this.socketAttachments.get(socket)
-      if (!attachment) {
-        continue
-      }
-
-      this.socketAttachments.set(socket, {
-        ...attachment,
-        canDraw: attachment.playerId === currentPlayerId,
-      })
-    }
   }
 
   async fetch(request: Request) {
@@ -176,7 +144,7 @@ export class DrawGameRoom extends DurableObject {
       // while standard WebSocket events are appropriate for live drawing.
       server.accept()
       this.sockets.add(server)
-      this.socketAttachments.set(server, { roomCode, playerId, playerName, canDraw: false })
+      this.socketAttachments.set(server, { roomCode, playerId, playerName })
       server.addEventListener('message', (event) => {
         void this.webSocketMessage(server, event.data as string | ArrayBuffer).catch(() => {
           server.close(1011, 'Failed to process message')
@@ -203,12 +171,8 @@ export class DrawGameRoom extends DurableObject {
       const gameJustStarted = room.status === 'waiting' && room.players.length === 2
       room.status = room.players.length === 2 ? 'playing' : 'waiting'
       if (gameJustStarted) {
-        room.word = pickWord()
-        room.currentTurnIndex = 0
-        room.round = 1
         room.strokes = []
       }
-      this.updateTurnAttachments(room)
       await this.persistRoom(room)
       this.broadcast(room)
 
@@ -239,14 +203,15 @@ export class DrawGameRoom extends DurableObject {
       strokeId?: string
       point?: Point
       points?: Point[]
+      eraseIds?: string[]
     }
 
     const senderId = playerId
 
-    // Drawing events only need authorization from the socket attachment and
-    // can be relayed without waking storage-backed room state.
+    // Drawing events are relayed without waking storage-backed room state so
+    // both connected players can draw with low latency.
     if (payload.type === 'draw:start' && payload.stroke) {
-      if (!attachment?.canDraw) {
+      if (!attachment?.playerId) {
         return
       }
 
@@ -255,7 +220,7 @@ export class DrawGameRoom extends DurableObject {
     }
 
     if (payload.type === 'draw:points' && payload.strokeId && payload.points?.length) {
-      if (!attachment?.canDraw) {
+      if (!attachment?.playerId) {
         return
       }
 
@@ -281,11 +246,6 @@ export class DrawGameRoom extends DurableObject {
     }
 
     if (payload.type === 'draw:end' && payload.stroke) {
-      const isCurrentTurn = activeRoom.players[activeRoom.currentTurnIndex]?.id === senderId
-      if (!isCurrentTurn) {
-        return
-      }
-
       const completedStroke = payload.stroke
       const existingStrokeIndex = activeRoom.strokes.findIndex((stroke) => stroke.id === completedStroke.id)
       if (existingStrokeIndex >= 0) {
@@ -301,31 +261,20 @@ export class DrawGameRoom extends DurableObject {
     }
 
     if (payload.type === 'clear') {
-      const isCurrentTurn = activeRoom.players[activeRoom.currentTurnIndex]?.id === senderId
-      if (!isCurrentTurn) {
-        return
-      }
-
       activeRoom.strokes = []
       this.broadcastEvent({ type: 'draw:clear' }, ws)
       await this.persistRoom(activeRoom)
       return
     }
 
-    if (payload.type === 'nextTurn') {
-      const isCurrentTurn = activeRoom.players[activeRoom.currentTurnIndex]?.id === senderId
-      if (!isCurrentTurn || activeRoom.players.length < 2) {
-        return
-      }
-
-      activeRoom.currentTurnIndex = activeRoom.currentTurnIndex === 0 ? 1 : 0
-      activeRoom.round += 1
-      activeRoom.strokes = []
-      activeRoom.word = pickWord()
-      this.updateTurnAttachments(activeRoom)
+    if (payload.type === 'draw:erase' && payload.eraseIds?.length) {
+      const eraseIds = new Set(payload.eraseIds.slice(0, 256))
+      activeRoom.strokes = activeRoom.strokes.filter((stroke) => !eraseIds.has(stroke.id))
+      this.broadcastEvent({ type: 'draw:erase', eraseIds: [...eraseIds] }, ws)
       await this.persistRoom(activeRoom)
-      this.broadcast(activeRoom)
+      return
     }
+
   }
 
   async webSocketClose(ws: WebSocket) {
@@ -352,12 +301,7 @@ export class DrawGameRoom extends DurableObject {
       return
     }
 
-    if (room.currentTurnIndex >= room.players.length) {
-      room.currentTurnIndex = 0
-    }
-
     room.status = room.players.length >= 2 ? 'playing' : 'waiting'
-    this.updateTurnAttachments(room)
     await this.persistRoom(room)
     this.broadcast(room)
   }
