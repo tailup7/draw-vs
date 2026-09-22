@@ -1,18 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
+import { eraseStrokes } from '../shared/eraser'
+import type { Point, Stroke } from '../shared/eraser'
 import './App.css'
-
-type Point = {
-  x: number
-  y: number
-}
-
-type Stroke = {
-  id: string
-  color: string
-  width: number
-  points: Point[]
-}
 
 type Player = {
   id: string
@@ -30,7 +20,7 @@ type RoomState = {
 type ToolMode = 'pen' | 'eraser' | 'pan'
 
 const CANVAS_WIDTH = 900
-const CANVAS_HEIGHT = 560
+const CANVAS_HEIGHT = 1120
 
 const DEFAULT_COLORS = [
   '#000000', '#ffffff', '#7f1d1d', '#dc2626', '#fb7185',
@@ -68,9 +58,11 @@ function App() {
   const [playerName, setPlayerName] = useState('Player')
   const [selectedColor, setSelectedColor] = useState('#000000')
   const [brushSize, setBrushSize] = useState(2)
+  const [eraserRadius, setEraserRadius] = useState(24)
   const [toolMode, setToolMode] = useState<ToolMode>('pen')
   const [eraserCursor, setEraserCursor] = useState<Point | null>(null)
   const [connected, setConnected] = useState(false)
+  const [hasJoinedRoom, setHasJoinedRoom] = useState(false)
   const [game, setGame] = useState<RoomState | null>(null)
   const [strokes, setStrokes] = useState<Stroke[]>([])
   const [isDrawing, setIsDrawing] = useState(false)
@@ -85,6 +77,7 @@ function App() {
   const pointFlushTimerRef = useRef<number | null>(null)
   const playerIdRef = useRef(selfId)
   const activePointerIdRef = useRef<number | null>(null)
+  const lastEraserPointRef = useRef<Point | null>(null)
   const pointersRef = useRef(new Map<number, Point>())
   const panGestureRef = useRef<{ pointerId: number; x: number; y: number; panX: number; panY: number } | null>(null)
   const pinchGestureRef = useRef<{ distance: number; center: Point; zoom: number; panX: number; panY: number } | null>(null)
@@ -189,6 +182,7 @@ function App() {
       }
 
       setConnected(true)
+      setHasJoinedRoom(true)
     }
 
     socket.onmessage = (event) => {
@@ -199,7 +193,9 @@ function App() {
         stroke?: Stroke
         strokeId?: string
         points?: Point[]
-        eraseIds?: string[]
+        eraserPath?: Point[]
+        eraserRadius?: number
+        eraseOperationId?: string
       }
 
       if (payload.type === 'state' && payload.room) {
@@ -229,13 +225,8 @@ function App() {
         setStrokes((previous) => previous.map((stroke) => stroke.id === receivedStrokeId ? { ...stroke, points: [...stroke.points, ...receivedPoints] } : stroke))
       }
 
-      if (payload.type === 'draw:clear') {
-        setStrokes([])
-      }
-
-      if (payload.type === 'draw:erase' && payload.eraseIds?.length) {
-        const eraseIds = new Set(payload.eraseIds)
-        setStrokes((previous) => previous.filter((stroke) => !eraseIds.has(stroke.id)))
+      if (payload.type === 'draw:erase' && payload.eraserPath?.length && payload.eraserRadius && payload.eraseOperationId) {
+        setStrokes((previous) => eraseStrokes(previous, payload.eraserPath!, payload.eraserRadius!, payload.eraseOperationId!))
       }
     }
 
@@ -252,6 +243,26 @@ function App() {
         setConnected(false)
       }
     }
+  }
+
+  const handleLeave = () => {
+    if (pointFlushTimerRef.current !== null) {
+      window.clearTimeout(pointFlushTimerRef.current)
+      pointFlushTimerRef.current = null
+    }
+
+    socketRef.current?.close()
+    socketRef.current = null
+    activeStrokeRef.current = null
+    pendingPointsRef.current = []
+    activePointerIdRef.current = null
+    lastEraserPointRef.current = null
+    setConnected(false)
+    setHasJoinedRoom(false)
+    setGame(null)
+    setStrokes([])
+    setIsDrawing(false)
+    setEraserCursor(null)
   }
 
   const sendMessage = (payload: Record<string, unknown>) => {
@@ -356,19 +367,17 @@ function App() {
     setIsDrawing(false)
   }
 
-  const eraseAtPoint = (point: Point) => {
-    const eraserRadius = brushSize / 2
-    const erasedIds = strokes
-      .filter((stroke) => stroke.points.some((strokePoint) => Math.hypot(strokePoint.x - point.x, strokePoint.y - point.y) <= eraserRadius))
-      .map((stroke) => stroke.id)
-
-    if (erasedIds.length === 0) {
-      return
-    }
-
-    const erasedIdSet = new Set(erasedIds)
-    setStrokes((previous) => previous.filter((stroke) => !erasedIdSet.has(stroke.id)))
-    sendMessage({ type: 'draw:erase', roomCode, playerId: playerIdRef.current, eraseIds: erasedIds })
+  const eraseAlongPath = (eraserPath: Point[]) => {
+    const eraseOperationId = crypto.randomUUID()
+    setStrokes((previous) => eraseStrokes(previous, eraserPath, eraserRadius, eraseOperationId))
+    sendMessage({
+      type: 'draw:erase',
+      roomCode,
+      playerId: playerIdRef.current,
+      eraserPath,
+      eraserRadius,
+      eraseOperationId,
+    })
   }
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -405,7 +414,8 @@ function App() {
 
     const point = getCanvasPoint(event)
     if (toolMode === 'eraser') {
-      eraseAtPoint(point)
+      lastEraserPointRef.current = point
+      eraseAlongPath([point])
       activePointerIdRef.current = event.pointerId
       setIsDrawing(true)
       event.preventDefault()
@@ -445,7 +455,9 @@ function App() {
     }
 
     if (isDrawing && toolMode === 'eraser' && activePointerIdRef.current === event.pointerId) {
-      eraseAtPoint(getCanvasPoint(event))
+      const point = getCanvasPoint(event)
+      eraseAlongPath(lastEraserPointRef.current ? [lastEraserPointRef.current, point] : [point])
+      lastEraserPointRef.current = point
       event.preventDefault()
       return
     }
@@ -483,6 +495,7 @@ function App() {
         finishActiveStroke()
       } else {
         activePointerIdRef.current = null
+        lastEraserPointRef.current = null
         setIsDrawing(false)
       }
     }
@@ -491,15 +504,6 @@ function App() {
   const handlePointerLeave = (event: ReactPointerEvent<HTMLDivElement>) => {
     setEraserCursor(null)
     handlePointerUp(event)
-  }
-
-  const handleClearBoard = () => {
-    if (!canDraw) {
-      return
-    }
-
-    setStrokes([])
-    sendMessage({ type: 'clear', roomCode, playerId: playerIdRef.current })
   }
 
   const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
@@ -529,23 +533,32 @@ function App() {
         </div>
       </header>
 
-      <section className="panel controls-panel">
-        <div className="control-group">
-          <label htmlFor="room-name">Room</label>
-          <input id="room-name" value={roomCode} onChange={(event) => setRoomCode(event.target.value)} />
-        </div>
+      <section className={`panel controls-panel ${hasJoinedRoom ? 'joined-controls-panel' : ''}`}>
+        {hasJoinedRoom ? (
+          <button className="secondary-button leave-room-button" onClick={handleLeave} type="button">
+            Leave room
+          </button>
+        ) : (
+          <>
+            <div className="control-group">
+              <label htmlFor="room-name">Room</label>
+              <input id="room-name" value={roomCode} onChange={(event) => setRoomCode(event.target.value)} />
+            </div>
 
-        <div className="control-group">
-          <label htmlFor="player-name">Player</label>
-          <input id="player-name" value={playerName} onChange={(event) => setPlayerName(event.target.value)} />
-        </div>
+            <div className="control-group">
+              <label htmlFor="player-name">Player</label>
+              <input id="player-name" value={playerName} onChange={(event) => setPlayerName(event.target.value)} />
+            </div>
 
-        <button className="primary-button" onClick={handleJoin} type="button">
-          {connected ? 'Reconnect' : 'Join room'}
-        </button>
+            <button className="primary-button" onClick={handleJoin} type="button">
+              Join room
+            </button>
+          </>
+        )}
       </section>
 
-      <section className="game-layout">
+      {canDraw ? (
+        <section className="game-layout">
         <div className="panel side-panel">
           <h2>Players</h2>
           <div className="players-list">
@@ -565,12 +578,26 @@ function App() {
           <div className="toolbar">
             <div className="tool-modes" aria-label="Drawing mode">
               <button type="button" className={toolMode === 'pen' ? 'selected' : ''} onClick={() => setToolMode('pen')} aria-label="Pen mode" title="Pen mode"><span className="tool-icon pen-icon" aria-hidden="true">✎</span></button>
-              <button type="button" className={toolMode === 'eraser' ? 'selected' : ''} onClick={() => setToolMode('eraser')} aria-label="Eraser mode" title="Eraser mode"><span className="tool-icon eraser-icon" aria-hidden="true">▱</span></button>
+              <button type="button" className={toolMode === 'eraser' ? 'selected' : ''} onClick={() => setToolMode('eraser')} aria-label="Eraser mode" title="Eraser mode">
+                <span className="tool-icon eraser-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" focusable="false">
+                    <path d="m5.2 14.8 8.9-8.9a2 2 0 0 1 2.8 0l3.2 3.2a2 2 0 0 1 0 2.8l-7.8 7.8H8.1l-2.9-2.9a2 2 0 0 1 0-2.8Z" fill="currentColor" />
+                    <path d="m9.1 18.8 7.8-7.8" stroke="var(--eraser-accent, #f472b6)" strokeWidth="2" />
+                    <path d="M4 20h16" stroke="currentColor" strokeLinecap="round" strokeWidth="2" />
+                  </svg>
+                </span>
+              </button>
               <button type="button" className={toolMode === 'pan' ? 'selected' : ''} onClick={() => setToolMode('pan')} aria-label="Pan mode" title="Pan mode"><span className="tool-icon pan-icon" aria-hidden="true">✋</span></button>
             </div>
-            <label>{toolMode === 'eraser' ? 'Eraser size' : 'Brush size'}</label>
-            <input type="range" min="1" max="8" value={brushSize} onChange={(event) => setBrushSize(Number(event.target.value))} />
-            <span>{brushSize}px</span>
+            <label>{toolMode === 'eraser' ? 'Eraser Size' : 'Brush size'}</label>
+            <input
+              type="range"
+              min={toolMode === 'eraser' ? 8 : 1}
+              max={toolMode === 'eraser' ? 80 : 8}
+              value={toolMode === 'eraser' ? eraserRadius : brushSize}
+              onChange={(event) => toolMode === 'eraser' ? setEraserRadius(Number(event.target.value)) : setBrushSize(Number(event.target.value))}
+            />
+            <span>{toolMode === 'eraser' ? `${eraserRadius}px radius` : `${brushSize}px`}</span>
           </div>
 
           <div className="palette" aria-label="Color palette">
@@ -586,11 +613,6 @@ function App() {
             ))}
           </div>
 
-          <div className="action-row">
-            <button type="button" className="secondary-button" onClick={handleClearBoard} disabled={!canDraw}>
-              Clear
-            </button>
-          </div>
         </div>
 
         <div className="panel board-panel">
@@ -609,22 +631,27 @@ function App() {
             onPointerLeave={handlePointerLeave}
             onPointerCancel={handlePointerUp}
           >
-            <canvas ref={canvasRef} width={900} height={560} className="draw-canvas" />
+            <canvas ref={canvasRef} width={CANVAS_WIDTH} height={CANVAS_HEIGHT} className="draw-canvas" />
             {toolMode === 'eraser' && eraserCursor && canvasRef.current && (
               <span
                 className="eraser-cursor"
                 style={{
                   left: eraserCursor.x,
                   top: eraserCursor.y,
-                  width: brushSize * (canvasRef.current.clientWidth / canvasRef.current.width),
-                  height: brushSize * (canvasRef.current.clientWidth / canvasRef.current.width),
+                  width: eraserRadius * 2 * (canvasRef.current.clientWidth / canvasRef.current.width),
+                  height: eraserRadius * 2 * (canvasRef.current.clientWidth / canvasRef.current.width),
                 }}
                 aria-hidden="true"
               />
             )}
           </div>
         </div>
-      </section>
+        </section>
+      ) : (
+        <section className="panel waiting-panel" aria-live="polite">
+          {hasJoinedRoom ? 'Waiting for an opponent to join this room...' : 'Join a room to wait for an opponent.'}
+        </section>
+      )}
     </main>
   )
 }

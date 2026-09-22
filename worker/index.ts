@@ -1,19 +1,9 @@
 import { DurableObject } from 'cloudflare:workers'
+import { eraseStrokes } from '../shared/eraser.ts'
+import type { Point, Stroke } from '../shared/eraser.ts'
 
 export interface Env extends Cloudflare.Env {
   DRAW_GAME: DurableObjectNamespace
-}
-
-type Point = {
-  x: number
-  y: number
-}
-
-type Stroke = {
-  id: string
-  color: string
-  width: number
-  points: Point[]
 }
 
 type Player = {
@@ -203,7 +193,9 @@ export class DrawGameRoom extends DurableObject {
       strokeId?: string
       point?: Point
       points?: Point[]
-      eraseIds?: string[]
+      eraserPath?: Point[]
+      eraserRadius?: number
+      eraseOperationId?: string
     }
 
     const senderId = playerId
@@ -260,17 +252,18 @@ export class DrawGameRoom extends DurableObject {
       return
     }
 
-    if (payload.type === 'clear') {
-      activeRoom.strokes = []
-      this.broadcastEvent({ type: 'draw:clear' }, ws)
-      await this.persistRoom(activeRoom)
-      return
-    }
+    if (payload.type === 'draw:erase' && payload.eraserPath?.length && payload.eraserRadius && payload.eraseOperationId) {
+      const eraserPath = payload.eraserPath
+        .slice(0, 2)
+        .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+      const eraserRadius = Math.min(80, Math.max(8, payload.eraserRadius))
 
-    if (payload.type === 'draw:erase' && payload.eraseIds?.length) {
-      const eraseIds = new Set(payload.eraseIds.slice(0, 256))
-      activeRoom.strokes = activeRoom.strokes.filter((stroke) => !eraseIds.has(stroke.id))
-      this.broadcastEvent({ type: 'draw:erase', eraseIds: [...eraseIds] }, ws)
+      if (eraserPath.length === 0) {
+        return
+      }
+
+      activeRoom.strokes = eraseStrokes(activeRoom.strokes, eraserPath, eraserRadius, payload.eraseOperationId)
+      this.broadcastEvent({ type: 'draw:erase', eraserPath, eraserRadius, eraseOperationId: payload.eraseOperationId }, ws)
       await this.persistRoom(activeRoom)
       return
     }

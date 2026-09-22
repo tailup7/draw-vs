@@ -45,6 +45,20 @@ h2 {
   margin-bottom: 20px;
 }
 
+.joined-controls-panel {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.leave-room-button {
+  width: fit-content;
+}
+
+.waiting-panel {
+  padding: 20px 22px;
+  color: #cbd5e1;
+}
+
 .control-group {
   display: flex;
   flex-direction: column;
@@ -144,14 +158,16 @@ button {
 }
 
 .player-card {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 12px 14px;
-  border-radius: 14px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
   background: rgba(15, 23, 42, 0.6);
   border: 1px solid rgba(148, 163, 184, 0.16);
   color: #f8fafc;
+  font-size: 0.82rem;
 }
 
 .player-card.active {
@@ -167,6 +183,7 @@ button {
 .player-card em {
   color: #cbd5e1;
   font-style: normal;
+  font-size: 0.72rem;
 }
 
 .toolbar {
@@ -206,12 +223,18 @@ button {
   line-height: 1;
 }
 
+.tool-icon svg {
+  display: block;
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
 .pen-icon {
   transform: scaleX(-1);
 }
 
 .eraser-icon {
-  transform: rotate(-45deg);
+  color: #f8fafc;
 }
 
 .palette {
@@ -232,16 +255,6 @@ button {
 .color-button.selected {
   box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.9);
   border-color: rgba(255, 255, 255, 0.9);
-}
-
-.action-row {
-  display: flex;
-  gap: 10px;
-  margin-top: 18px;
-}
-
-.action-row button {
-  flex: 1;
 }
 
 .board-panel {
@@ -289,7 +302,7 @@ button {
   position: relative;
   overflow: hidden;
   width: 100%;
-  aspect-ratio: 16 / 10;
+  aspect-ratio: 45 / 56;
   border-radius: 18px;
   background: #ffffff;
   touch-action: none;
@@ -298,7 +311,7 @@ button {
 .draw-canvas {
   width: 100%;
   height: auto;
-  aspect-ratio: 16 / 10;
+  aspect-ratio: 45 / 56;
   background: #ffffff;
   display: block;
   border: 1px solid rgba(148, 163, 184, 0.25);
@@ -325,9 +338,9 @@ button {
 .eraser-cursor {
   position: absolute;
   z-index: 1;
-  border: 1px solid rgba(15, 23, 42, 0.85);
+  border: 2px dashed rgba(37, 99, 235, 0.95);
   border-radius: 50%;
-  background: rgba(148, 163, 184, 0.12);
+  background: rgba(59, 130, 246, 0.12);
   transform: translate(-50%, -50%);
   pointer-events: none;
   box-sizing: border-box;
@@ -338,8 +351,43 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .joined-controls-panel {
+    align-items: stretch;
+  }
+
+  .leave-room-button {
+    width: 100%;
+  }
+
   .game-layout {
     grid-template-columns: 1fr;
+  }
+
+  .board-panel {
+    order: -1;
+  }
+
+  .side-panel {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .side-panel .toolbar {
+    order: 1;
+    margin-top: 0;
+  }
+
+  .side-panel .palette {
+    order: 2;
+  }
+
+  .side-panel h2 {
+    order: 4;
+    margin-top: 24px;
+  }
+
+  .side-panel .players-list {
+    order: 5;
   }
 
   .topbar {
